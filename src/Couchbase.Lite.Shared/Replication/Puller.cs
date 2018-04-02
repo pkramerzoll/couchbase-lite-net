@@ -686,6 +686,7 @@ namespace Couchbase.Lite.Replicator
                         // Insert the revision:
                         try {
                             LocalDatabase.ForceInsert(rev, history, RemoteUrl);
+							EnqueueReplicated(rev.DocID, rev.RevID.ToString());
                         } catch (CouchbaseLiteException e) {
                             if (e.Code == StatusCode.Forbidden) {
                                 Log.To.Sync.I(TAG, "{0} remote rev failed validation: {1}", this, rev);

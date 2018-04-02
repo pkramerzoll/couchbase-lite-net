@@ -215,7 +215,12 @@ namespace Couchbase.Lite
             add { _changed = (EventHandler<ReplicationChangeEventArgs>)Delegate.Combine(_changed, value); }
             remove { _changed = (EventHandler<ReplicationChangeEventArgs>)Delegate.Remove(_changed, value); }
         }
-        private EventHandler<ReplicationChangeEventArgs> _changed;
+		private EventHandler<ReplicationChangeEventArgs> _changed;
+
+		/// <summary>
+		/// Occurs when a document has been replicated.
+		/// </summary>
+		public event EventHandler<ReplicatedEventArgs> Replicated = null;
 
         /// <summary>
         /// The state machine the holds and controls the state of the replicator
@@ -262,6 +267,7 @@ namespace Couchbase.Lite
         private CancellationTokenSource _retryIfReadyTokenSource;
         
         private readonly Queue<ReplicationChangeEventArgs> _eventQueue = new Queue<ReplicationChangeEventArgs>();
+		private readonly Queue<ReplicatedEventArgs> _replicatedQueue = new Queue<ReplicatedEventArgs>();
         private HashSet<string> _pendingDocumentIDs;
         private long _pendingDocumentIDsSequence;
         private long _lastSequencePushed;
@@ -1248,6 +1254,30 @@ namespace Couchbase.Lite
             FireTrigger(ReplicationTrigger.StopImmediate);
         }
 
+		/// <summary>
+		/// Queues up an event indicating the document represented by the provided arguments has been replicated.
+		/// </summary>
+		/// <param name="documentId">The document ID.</param>
+		/// <param name="revisionId">The document revision.</param>
+		/// <param name="successful">True if the revision was replicated successfully, otherwise false.</param>
+		/// <param name="message">A message related to the replicated document, if relevant.</param>
+		/// <param name="ex">An <see cref="Exception"/> related to the replicated document, if relevant.</param>
+		protected void EnqueueReplicated(string documentId, string revisionId, bool successful = true, string message = null, Exception ex = null)
+		{
+			if(string.IsNullOrWhiteSpace(documentId) || string.IsNullOrWhiteSpace(revisionId) || Replicated == null)
+				return;
+
+			lock(_replicatedQueue) {
+				_replicatedQueue.Enqueue(new ReplicatedEventArgs(){
+						DocumentId = documentId,
+						Error = ex,
+						Message = !string.IsNullOrWhiteSpace(message) ? message : ex?.Message,
+						RevisionId = revisionId,
+						Successful = successful
+				});
+			}
+		}
+
         #endregion
 
         #region Internal Methods
@@ -1884,7 +1914,7 @@ namespace Couchbase.Lite
             NotifyChangeListeners(stateTransition);
         }
 
-        private void NotifyChangeListeners(ReplicationStateTransition transition = null) 
+        protected void NotifyChangeListeners(ReplicationStateTransition transition = null) 
         {
             Log.To.Sync.V(Tag, "NotifyChangeListeners ({0}/{1}, state={2} (batch={3}, net={4}))",
                 CompletedChangesCount, ChangesCount,
@@ -1898,17 +1928,14 @@ namespace Couchbase.Lite
 
             Username = (Authenticator as IAuthorizer)?.Username;
             var evt = _changed;
-            if (evt == null) {
-                return;
-            }
-
-            var args = new ReplicationChangeEventArgs(this, transition);
 
             // Ensure callback runs on captured context, which should be the UI thread.
             var stackTrace = Environment.StackTrace;
 
             lock(_eventQueue) {
-                _eventQueue.Enqueue(args);
+				if(evt != null) {
+					_eventQueue.Enqueue(new ReplicationChangeEventArgs(this, transition));
+				}
             }
 
             Log.To.TaskScheduling.V(Tag, "Scheduling Changed callback...");
@@ -1924,13 +1951,23 @@ namespace Couchbase.Lite
 
                         while (_eventQueue.Count > 0) {
                             try {
-                                evt (this, _eventQueue.Dequeue ());
+                                evt?.Invoke(this, _eventQueue.Dequeue ());
                             } catch (Exception e) {
                                 Log.To.Sync.E (Tag, "Exception in Changed callback, " +
                                                "this will cause instability unless corrected!", e);
                             }
                         }
                     }
+
+					lock(_replicatedQueue) {
+						while(_replicatedQueue.Count > 0) {
+							try {
+								Replicated?.Invoke(this, _replicatedQueue.Dequeue());
+							} catch(Exception ex) {
+								Log.To.Sync.E (Tag, "Exception in Replicated callback.", ex);
+							}
+						}
+					}
                 });
             }
         }
@@ -2015,6 +2052,37 @@ namespace Couchbase.Lite
 
         }
     }
+
+	/// <summary>
+	/// Represents event arguments for when a document has been replicated.
+	/// </summary>
+	public class ReplicatedEventArgs : EventArgs
+	{
+		/// <summary>
+		/// Gets the document ID.
+		/// </summary>
+		public string DocumentId { get; internal set; }
+
+		/// <summary>
+		/// Gets the document revision.
+		/// </summary>
+		public string RevisionId { get; internal set; }
+
+		/// <summary>
+		/// Gets a value indicating whether the document was replicated successfully.
+		/// </summary>
+		public bool Successful { get; internal set; }
+
+		/// <summary>
+		/// Gets the message related to the replication of the document.
+		/// </summary>
+		public string Message { get; internal set; }
+
+		/// <summary>
+		/// Gets an <see cref="Exception"/> related to the replication, if relevant.
+		/// </summary>
+		public Exception Error { get; internal set; }
+	}
 
     #endregion
 

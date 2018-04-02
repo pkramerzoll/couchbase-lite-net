@@ -991,7 +991,42 @@ namespace Couchbase.Lite
             }
         }
 
-        [Test]
+		[Test]
+		public void TestPullerReplicatedEvent()
+		{
+			if (!Boolean.Parse((string)GetProperty("replicationTestsEnabled")))
+			{
+				Assert.Inconclusive("Replication tests disabled.");
+				return;
+			}
+
+			Log.Domains.Sync.Level = Log.LogLevel.Debug;
+			using (var remoteDb = _sg.CreateDatabase(TempDbName()))
+			{
+				var docIdTimestamp = Convert.ToString((ulong)DateTime.UtcNow.TimeSinceEpoch().TotalMilliseconds);
+				var doc1Id = string.Format("doc1-{0}", docIdTimestamp);
+				var doc2Id = string.Format("doc2-{0}", docIdTimestamp);
+				remoteDb.AddDocument(doc1Id, "attachment.png");
+				remoteDb.AddDocument(doc2Id, "attachment2.png");
+
+				var pull = database.CreatePullReplication(remoteDb.RemoteUri);
+				CountdownEvent replicatedEvent = new CountdownEvent(2);
+
+				pull.Replicated += (sender, e) =>
+				{
+					if (e.DocumentId == doc1Id || e.DocumentId == doc2Id)
+						replicatedEvent.Signal();
+				};
+
+				RunReplication(pull);
+
+				Assert.IsTrue(replicatedEvent.Wait(TimeSpan.FromSeconds(60)));
+			
+				StopReplication(pull);
+			}
+		}
+
+		[Test]
         public void TestPusherChangedEvent()
         {
             if (!Boolean.Parse((string)GetProperty("replicationTestsEnabled")))
@@ -1073,7 +1108,42 @@ namespace Couchbase.Lite
             }
         }
 
-        [Test] // Issue #449
+		[Test]
+		public void TestPusherReplicatedEvent()
+		{
+			if (!Boolean.Parse((string)GetProperty("replicationTestsEnabled")))
+			{
+				Assert.Inconclusive("Replication tests disabled.");
+				return;
+			}
+
+			using (var remoteDb = _sg.CreateDatabase(TempDbName()))
+			{
+				CreateDocuments(database, 2);
+				var push = database.CreatePushReplication(remoteDb.RemoteUri);
+
+				RunReplication(push);
+				Sleep(1000);
+
+				Assert.IsNull(push.LastError);
+				var replicatedEvent = new ManualResetEventSlim();
+				ReplicatedEventArgs args = null;
+				push.Replicated += (sender, e) =>
+				{
+					args = e;
+					replicatedEvent.Set();
+				};
+
+				push.Start();
+				Assert.IsTrue(replicatedEvent.Wait(TimeSpan.FromSeconds(60)));
+				Assert.IsNull(push.LastError);
+				Assert.IsNotNull(args);
+
+				StopReplication(push);
+			}
+		}
+
+		[Test] // Issue #449
         public void TestPushAttachmentToCouchDB()
         {
             var couchDb = new CouchDB(GetReplicationProtocol(), GetReplicationServer());
